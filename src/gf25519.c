@@ -48,6 +48,16 @@ static const gf GF_P = {
 #define ST_(x)   #x
 
 /*
+ * Mangle a C symbol name for use inside inline assembly. On Darwin (Mach-O),
+ * C identifiers are emitted with a leading underscore; ELF has no such prefix.
+ */
+#if defined(__APPLE__)
+#define SYM(x)   "_" #x
+#else
+#define SYM(x)   #x
+#endif
+
+/*
  * If USE_ALT_REDUCTION is 1, then an alternate reduction step is used
  * in gf_mul_inline() and gf_sqr_inline(). The alternate reduction step
  * involves an extra multiplication, but reduces the length of a
@@ -370,7 +380,7 @@ gf_mul_inline(gf *d, const gf *a, const gf *b)
 		   to fold. This is extra work right now, but removes
 		   an extra dependency later on. */
 		"shld	$1, %%r11, %%r15\n\t"
-		"andq	global_m63(%%rip), %%r11\n\t"
+		"andq	" SYM(global_m63) "(%%rip), %%r11\n\t"
 		"imulq	$(" ST(MQ) "), %%r15, %%r15\n\t"
 		"addq	%%r15, %%r8\n\t"
 		"adcq	%%rsi, %%r9\n\t"
@@ -519,7 +529,7 @@ gf_sqr_inline(gf *d, const gf *a)
 		   to fold. This is extra work right now, but removes
 		   an extra dependency later on. */
 		"shld	$1, %%r11, %%r15\n\t"
-		"andq	global_m63(%%rip), %%r11\n\t"
+		"andq	" SYM(global_m63) "(%%rip), %%r11\n\t"
 		"imulq	$(" ST(MQ) "), %%r15, %%r15\n\t"
 		"addq	%%r15, %%r8\n\t"
 		"adcq	%%rsi, %%r9\n\t"
@@ -672,7 +682,7 @@ gf_sqr_x_inline(gf *d, const gf *a, long num)
 		   to fold. This is extra work right now, but removes
 		   an extra dependency later on. */
 		"shld	$1, %%rbp, %%r15\n\t"
-		"andq	global_m63(%%rip), %%rbp\n\t"
+		"andq	" SYM(global_m63) "(%%rip), %%rbp\n\t"
 		"imulq	$(" ST(MQ) "), %%r15, %%r15\n\t"
 		"addq	%%r15, %%rax\n\t"
 		"adcq	%%r10, %%rbx\n\t"

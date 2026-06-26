@@ -1,12 +1,11 @@
-CC = clang
-CFLAGS = -W -Wall -O3 -march=native
-LD = clang
+CFLAGS = -W -Wall -O3 -march=native -I$(HOME)/.local/include
+LD = arch -x86_64 gcc
 LDFLAGS =
 LIBS =
 
 OBJ = gf25519.o
 TESTOBJ = sha3.o test_gf25519.o
-TESTLIBS = -lgmp
+TESTLIBS = -L$(HOME)/.local/lib -lgmp 
 
 all: test_gf25519
 

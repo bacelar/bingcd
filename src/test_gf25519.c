@@ -603,6 +603,7 @@ speed_inv_FLT(void)
 int
 main(int argc, char *argv[])
 {
+#ifndef __MACH__
 	/*
 	 * If given an explicit argument, then we use it as a CPU/core
 	 * identifier to bind ourselves.
@@ -619,7 +620,7 @@ main(int argc, char *argv[])
 			perror("sched_setaffinity");
 		}
 	}
-
+#endif
 	test_add();
 	test_mul();
 	test_inv();
