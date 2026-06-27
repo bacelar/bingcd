@@ -32,6 +32,13 @@ static const gf GF_INVT508 = {
 };
 #define GF_MODPRIME   1
 
+static const gf GF_INVT527 = {
+  0x6c7fa53adbd5738f,
+	0xd07ccf11ba81104f,
+	0x5463479f8e8992ca,
+	0x3636449c02d62921
+};
+
 /*
  * Constants below need not be modified if MQ is changed.
  */
@@ -1462,6 +1469,433 @@ gf_inv(gf *d, const gf *y)
 	 * may have misdetected that case.
 	 */
 	gf_mul_inline(&v, &v, &GF_INVT508);
+	gf_mul_inline(&u, &v, y);
+	r = -gf_eq(&u, &GF_ONE);
+	d->v0 = v.v0 & r;
+	d->v1 = v.v1 & r;
+	d->v2 = v.v2 & r;
+	d->v3 = v.v3 & r;
+	return r & 1;
+#endif
+}
+
+/* see gf25519.h */
+uint64_t
+gf_inv0(gf *d, const gf *y)
+{
+	gf a, b, u, v;
+	unsigned long long f0, f1, g0, g1, xa, xb;
+	unsigned long long nega, negb;
+	int i;
+#if !GF_MODPRIME
+	unsigned long long r;
+#endif
+
+	/*
+	 * Extended binary GCD:
+	 *
+	 *   a <- y
+	 *   b <- q
+	 *   u <- 1
+	 *   v <- 0
+	 *
+	 * a and b are nonnnegative integers (in the 0..q range). u
+	 * and v are integers modulo q.
+	 *
+	 * Invariants:
+	 *    a = y*u mod q
+	 *    b = y*v mod q
+	 *    b is always odd
+	 *
+	 * At each step:
+	 *    if a is even, then:
+	 *        a <- a/2, u <- u/2 mod q
+	 *    else:
+	 *        if a < b:
+	 *            (a, u, b, v) <- (b, v, a, u)
+	 *        a <- (a-b)/2, u <- (u-v)/2 mod q
+	 *
+	 * At one point, value a reaches 0; it will then stay there
+	 * (all subsequent steps will only keep a at zero). The value
+	 * of b is then GCD(y, p), i.e. 1 if y is invertible; value v
+	 * is then the inverse of y modulo p.
+	 *
+	 * If y = 0, then a is initially at zero and stays there, and
+	 * v is unchanged. The function then returns 0 as "inverse" of
+	 * zero, which is the desired behaviour; therefore, no corrective
+	 * action is necessary.
+	 *
+	 * It can be seen that each step will decrease the size of one of
+	 * a and b by at least 1 bit; thus, starting with two values of
+	 * at most 255 bits each, 509 iterations are always sufficient.
+	 *
+	 *
+	 * In practice, we optimize this code in the following way:
+	 *  - We do iterations by group of 31.
+	 *  - In each group, we use _approximations_ of a and b that
+	 *    fit on 64 bits each:
+	 *      Let n = max(len(a), len(b)).
+	 *      If n <= 64, then xa = na and xb = nb.
+	 *      Otherwise:
+	 *         xa = (a mod 2^31) + 2^31*floor(a / 2^(n - 33))
+	 *         xb = (b mod 2^31) + 2^31*floor(b / 2^(n - 33))
+	 *    I.e. we keep the same low 31 bits, but we remove all the
+	 *    "middle" bits to just keep the higher bits. At least one
+	 *    of the two values xa and xb will have maximum length (64 bits)
+	 *    if either of a or b exceeds 64 bits.
+	 *  - We record which subtract and swap we did into update
+	 *    factors, which we apply en masse to a, b, u and v after
+	 *    the 31 iterations.
+	 *
+	 * Since we kept the correct low 31 bits, all the "subtract or
+	 * not" decisions are correct, but the "swap or not swap" might
+	 * be wrong, since these use the difference between the two
+	 * values, and we only have approximations thereof. A consequence
+	 * is that after the update, a and/or b may be negative. If a < 0,
+	 * we negate it, and also negate u (which we do by negating the
+	 * update factors f0 and g0 before applying them to compute the
+	 * new value of u); similary for b and v.
+	 *
+	 * It can be shown that the 31 iterations, along with the
+	 * conditional negation, ensure that len(a)+len(b) is still
+	 * reduced by at least 31 bits (compared with the classic binary
+	 * GCD, the use of the approximations may make the code "miss one
+	 * bit", but the conditional subtraction regains it). Thus,
+	 * 509 iterations are sufficient in total. As explained later on,
+	 * we can skip the final iteration as well.
+	 */
+
+	gf_normalize(&a, y);
+	b = GF_P;
+	u = GF_ONE;
+	v = GF_ZERO;
+
+	/*
+	 * Generic loop first does 15*31 = 465 iterations.
+	 17*31 = 527
+	 */
+	for (i = 0; i < 15+2; i ++) {
+		unsigned long long m1, m2, m3, tnz1, tnz2, tnz3;
+		unsigned long long tnzm, tnza, tnzb, snza, snzb;
+		unsigned long long s, sm;
+		gf na, nb, nu, nv;
+
+		/*
+		 * Get approximations of a and b over 64 bits:
+		 *  - If len(a) <= 64 and len(b) <= 64, then we just
+		 *    use the value (low limb).
+		 *  - Otherwise, with n = max(len(a), len(b)), we use:
+		 *       (a mod 2^31) + 2^31*(floor(a / 2^(n-33)))
+		 *       (b mod 2^31) + 2^31*(floor(b / 2^(n-33)))
+		 * I.e. we remove the "middle bits".
+		 */
+		m3 = a.v3 | b.v3;
+		m2 = a.v2 | b.v2;
+		m1 = a.v1 | b.v1;
+		tnz3 = -((m3 | -m3) >> 63);
+		tnz2 = -((m2 | -m2) >> 63) & ~tnz3;
+		tnz1 = -((m1 | -m1) >> 63) & ~tnz3 & ~tnz2;
+		tnzm = (m3 & tnz3) | (m2 & tnz2) | (m1 & tnz1);
+		tnza = (a.v3 & tnz3) | (a.v2 & tnz2) | (a.v1 & tnz1);
+		tnzb = (b.v3 & tnz3) | (b.v2 & tnz2) | (b.v1 & tnz1);
+		snza = (a.v2 & tnz3) | (a.v1 & tnz2) | (a.v0 & tnz1);
+		snzb = (b.v2 & tnz3) | (b.v1 & tnz2) | (b.v0 & tnz1);
+
+		/*
+		 * If both len(a) <= 64 and len(b) <= 64, then:
+		 *    tnzm = 0
+		 *    tnza = 0, snza = 0, tnzb = 0, snzb = 0
+		 *    tnzm = 0
+		 * Otherwise:
+		 *    tnzm != 0, length yields value of n
+		 *    tnza contains the top limb of a, snza the second limb
+		 *    tnzb contains the top limb of b, snzb the second limb
+		 *
+		 * We count the number of leading zero bits in tnzm:
+		 *  - If s <= 31, then the top 31 bits can be extracted
+		 *    from tnza and tnzb alone.
+		 *  - If 32 <= s <= 63, then we need some bits from snza
+		 *    as well.
+		 *
+		 * We rely on the fact shifts don't reveal the shift count
+		 * through side channels. This would not have been true on
+		 * the Pentium IV, but it is true on all known x86 CPU that
+		 * have 64-bit support and implement the LZCNT opcode.
+		 */
+		s = _lzcnt_u64(tnzm);
+		sm = -((unsigned long long)(31 - s) >> 63);
+		tnza ^= sm & (tnza ^ ((tnza << 32) | (snza >> 32)));
+		tnzb ^= sm & (tnzb ^ ((tnzb << 32) | (snzb >> 32)));
+		s -= 32 & sm;
+		tnza <<= s;
+		tnzb <<= s;
+
+		/*
+		 * At this point:
+		 *  - If len(a) <= 64 and len(b) <= 64, then:
+		 *       tnza = 0
+		 *       tnzb = 0
+		 *       tnz1 = tnz2 = tnz3 = 0
+		 *  - Otherwise, we need to use the top 33 bits of tnza
+		 *    and tnzb in combination with the low 31 bits of
+		 *    a.v0 and b.v0, respectively.
+		 */
+		tnza |= a.v0 & ~(tnz1 | tnz2 | tnz3);
+		tnzb |= b.v0 & ~(tnz1 | tnz2 | tnz3);
+		xa = (a.v0 & 0x7FFFFFFF) | (tnza & 0xFFFFFFFF80000000);
+		xb = (b.v0 & 0x7FFFFFFF) | (tnzb & 0xFFFFFFFF80000000);
+
+		/*
+		 * We can now run the binary GCD on xa and xb for 31
+		 * rounds. We unroll it a bit (two rounds per loop
+		 * iteration), it seems to save about 250 cycles in
+		 * total on a Coffee Lake core.
+		 */
+
+		__asm__ __volatile__ (
+			/*
+			 * f0 = 1
+			 * g0 = 0
+			 * f1 = 0
+			 * g1 = 1
+			 * We add 0x7FFFFFFF to all four values, and
+			 * group them by pairs into registers.
+			 */
+			"movq	$0x7FFFFFFF7FFFFFFF, %%rdx\n\t"
+			"movq	$0x7FFFFFFF80000000, %%rax\n\t"
+			"movq	$0x800000007FFFFFFF, %%rcx\n\t"
+
+			/*
+			 * Do the loop. Tests on a Coffee Lake core seem
+			 * to indicate that not unrolling is best here.
+			 * Loop counter is in r8.
+			 */
+			"movl	$31, %%r8d\n\t"
+			"0:\n\t"
+			INV_INNER_FAST
+			"decl	%%r8d\n\t"
+			"jnz	0b\n\t"
+
+			/*
+			 * Split f0, f1, g0 and g1 into separate variables.
+			 */
+			"movq	%%rax, %%rbx\n\t"
+			"movq	%%rcx, %%rdx\n\t"
+			"shrq	$32, %%rbx\n\t"
+			"shrq	$32, %%rdx\n\t"
+			"orl	%%eax, %%eax\n\t"
+			"orl	%%ecx, %%ecx\n\t"
+			"subq	$0x7FFFFFFF, %%rax\n\t"
+			"subq	$0x7FFFFFFF, %%rbx\n\t"
+			"subq	$0x7FFFFFFF, %%rcx\n\t"
+			"subq	$0x7FFFFFFF, %%rdx\n\t"
+
+			: "=a" (f0), "=b" (g0), "=c" (f1), "=d" (g1),
+			  "=S" (xa), "=D" (xb)
+			: "4" (xa), "5" (xb)
+			: "cc", "r8", "r10", "r11",
+			  "r12", "r13", "r14", "r15" );
+
+		/*
+		 * We now need to propagate updates to a, b, u and v.
+		 */
+		nega = s256_lin_div31_abs(&na, &a, &b, f0, g0);
+		negb = s256_lin_div31_abs(&nb, &a, &b, f1, g1);
+		f0 = (f0 ^ -nega) + nega;
+		g0 = (g0 ^ -nega) + nega;
+		f1 = (f1 ^ -negb) + negb;
+		g1 = (g1 ^ -negb) + negb;
+		gf_lin(&nu, &u, &v, f0, g0);
+		gf_lin(&nv, &u, &v, f1, g1);
+		a = na;
+		b = nb;
+		u = nu;
+		v = nv;
+	}
+
+	/*
+	 * We did 31*17 = 527 iterations, and each injected a factor 2,
+	 * thus we must divide by 2^527 (mod q).
+	 */
+#if GF_MODPRIME
+	/*
+	 * Result is correct if source operand was invertible, i.e.
+	 * distinct from zero (since all non-zero values are invertible
+	 * modulo a prime integer); the inverse is then also non-zero.
+	 * If the source was zero, then the result is zero as well. We
+	 * can thus test d instead of a.
+	 */
+	gf_mul_inline(d, &v, &GF_INVT527);
+	return gf_iszero(d) ^ 1;
+#else
+	/*
+	 * Verification of the computed inverse: for a non-prime modulus,
+	 * there are non-invertible values other than zero, and the code
+	 * above, especially with the optimizations in the final rounds,
+	 * may have misdetected that case.
+	 */
+	gf_mul_inline(&v, &v, &GF_INVT527);
+	gf_mul_inline(&u, &v, y);
+	r = -gf_eq(&u, &GF_ONE);
+	d->v0 = v.v0 & r;
+	d->v1 = v.v1 & r;
+	d->v2 = v.v2 & r;
+	d->v3 = v.v3 & r;
+	return r & 1;
+#endif
+}
+
+/* see gf25519.h */
+uint64_t
+gf_inv1(gf *d, const gf *y)
+{
+	gf a, b, u, v;
+	unsigned long long f0, f1, g0, g1, xa, xb;
+	unsigned long long nega, negb;
+	int i;
+#if !GF_MODPRIME
+	unsigned long long r;
+#endif
+
+gf_normalize(&a, y);
+	b = GF_P;
+	u = GF_ONE;
+	v = GF_ZERO;
+
+	/*
+	 * Generic loop first does 15*31 = 465 iterations.
+	 17*31 = 527
+	 */
+	for (i = 0; i < 15+2; i ++) {
+		unsigned long long m1, m2, m3, tnz1, tnz2, tnz3;
+		unsigned long long tnzm, tnza, tnzb, snza, snzb;
+		unsigned long long s, sm;
+		gf na, nb, nu, nv;
+
+		/*
+		 * Get approximations of a and b over 64 bits:
+		 *  - If len(a) <= 64 and len(b) <= 64, then we just
+		 *    use the value (low limb).
+		 *  - Otherwise, with n = max(len(a), len(b)), we use:
+		 *       (a mod 2^31) + 2^31*(floor(a / 2^(n-33)))
+		 *       (b mod 2^31) + 2^31*(floor(b / 2^(n-33)))
+		 * I.e. we remove the "middle bits".
+		 */
+		m3 = a.v3 | b.v3;
+		m2 = a.v2 | b.v2;
+		m1 = a.v1 | b.v1;
+		tnz3 = -((m3 | -m3) >> 63);
+		tnz2 = -((m2 | -m2) >> 63) & ~tnz3;
+		tnz1 = -((m1 | -m1) >> 63) & ~tnz3 & ~tnz2;
+		tnzm = (m3 & tnz3) | (m2 & tnz2) | (m1 & tnz1);
+		tnza = (a.v3 & tnz3) | (a.v2 & tnz2) | (a.v1 & tnz1);
+		tnzb = (b.v3 & tnz3) | (b.v2 & tnz2) | (b.v1 & tnz1);
+		snza = (a.v2 & tnz3) | (a.v1 & tnz2) | (a.v0 & tnz1);
+		snzb = (b.v2 & tnz3) | (b.v1 & tnz2) | (b.v0 & tnz1);
+
+		s = _lzcnt_u64(tnzm);
+		sm = -((unsigned long long)(31 - s) >> 63);
+		tnza ^= sm & (tnza ^ ((tnza << 32) | (snza >> 32)));
+		tnzb ^= sm & (tnzb ^ ((tnzb << 32) | (snzb >> 32)));
+		s -= 32 & sm;
+		tnza <<= s;
+		tnzb <<= s;
+
+		tnza |= a.v0 & ~(tnz1 | tnz2 | tnz3);
+		tnzb |= b.v0 & ~(tnz1 | tnz2 | tnz3);
+		xa = (a.v0 & 0x7FFFFFFF) | (tnza & 0xFFFFFFFF80000000);
+		xb = (b.v0 & 0x7FFFFFFF) | (tnzb & 0xFFFFFFFF80000000);
+
+		/*
+		 * We can now run the binary GCD on xa and xb for 31
+		 * rounds. We unroll it a bit (two rounds per loop
+		 * iteration), it seems to save about 250 cycles in
+		 * total on a Coffee Lake core.
+		 */
+
+		__asm__ __volatile__ (
+			/*
+			 * f0 = 1
+			 * g0 = 0
+			 * f1 = 0
+			 * g1 = 1
+			 * We add 0x7FFFFFFF to all four values, and
+			 * group them by pairs into registers.
+			 */
+			"movq	$0x7FFFFFFF7FFFFFFF, %%rdx\n\t"
+			"movq	$0x7FFFFFFF80000000, %%rax\n\t"
+			"movq	$0x800000007FFFFFFF, %%rcx\n\t"
+
+			/*
+			 * Do the loop. Tests on a Coffee Lake core seem
+			 * to indicate that not unrolling is best here.
+			 * Loop counter is in r8.
+			 */
+			"movl	$31, %%r8d\n\t"
+			"0:\n\t"
+			INV_INNER
+			"decl	%%r8d\n\t"
+			"jnz	0b\n\t"
+
+			/*
+			 * Split f0, f1, g0 and g1 into separate variables.
+			 */
+			"movq	%%rax, %%rbx\n\t"
+			"movq	%%rcx, %%rdx\n\t"
+			"shrq	$32, %%rbx\n\t"
+			"shrq	$32, %%rdx\n\t"
+			"orl	%%eax, %%eax\n\t"
+			"orl	%%ecx, %%ecx\n\t"
+			"subq	$0x7FFFFFFF, %%rax\n\t"
+			"subq	$0x7FFFFFFF, %%rbx\n\t"
+			"subq	$0x7FFFFFFF, %%rcx\n\t"
+			"subq	$0x7FFFFFFF, %%rdx\n\t"
+
+			: "=a" (f0), "=b" (g0), "=c" (f1), "=d" (g1),
+			  "=S" (xa), "=D" (xb)
+			: "4" (xa), "5" (xb)
+			: "cc", "r8", "r10", "r11",
+			  "r12", "r13", "r14", "r15" );
+
+		/*
+		 * We now need to propagate updates to a, b, u and v.
+		 */
+		nega = s256_lin_div31_abs(&na, &a, &b, f0, g0);
+		negb = s256_lin_div31_abs(&nb, &a, &b, f1, g1);
+		f0 = (f0 ^ -nega) + nega;
+		g0 = (g0 ^ -nega) + nega;
+		f1 = (f1 ^ -negb) + negb;
+		g1 = (g1 ^ -negb) + negb;
+		gf_lin(&nu, &u, &v, f0, g0);
+		gf_lin(&nv, &u, &v, f1, g1);
+		a = na;
+		b = nb;
+		u = nu;
+		v = nv;
+	}
+
+	/*
+	 * We did 31*17 = 527 iterations, and each injected a factor 2,
+	 * thus we must divide by 2^527 (mod q).
+	 */
+#if GF_MODPRIME
+	/*
+	 * Result is correct if source operand was invertible, i.e.
+	 * distinct from zero (since all non-zero values are invertible
+	 * modulo a prime integer); the inverse is then also non-zero.
+	 * If the source was zero, then the result is zero as well. We
+	 * can thus test d instead of a.
+	 */
+	gf_mul_inline(d, &v, &GF_INVT527);
+	return gf_iszero(d) ^ 1;
+#else
+	/*
+	 * Verification of the computed inverse: for a non-prime modulus,
+	 * there are non-invertible values other than zero, and the code
+	 * above, especially with the optimizations in the final rounds,
+	 * may have misdetected that case.
+	 */
+	gf_mul_inline(&v, &v, &GF_INVT527);
 	gf_mul_inline(&u, &v, y);
 	r = -gf_eq(&u, &GF_ONE);
 	d->v0 = v.v0 & r;

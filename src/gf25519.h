@@ -52,6 +52,8 @@ void gf_mul(gf *d, const gf *a, const gf *b);
 void gf_sqr(gf *d, const gf *a);
 void gf_sqr_x(gf *d, const gf *a, long num);
 uint64_t gf_inv(gf *d, const gf *a);
+uint64_t gf_inv0(gf *d, const gf *a);
+uint64_t gf_inv1(gf *d, const gf *a);
 
 /*
  * For performance comparisons only, if GF_INV_FLT is defined to

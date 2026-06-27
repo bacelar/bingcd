@@ -1,5 +1,5 @@
 CFLAGS = -W -Wall -O3 -march=native -I$(HOME)/.local/include
-LD = arch -x86_64 gcc
+LD ?= arch -x86_64 gcc
 LDFLAGS =
 LIBS =
 

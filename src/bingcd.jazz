@@ -1,0 +1,206 @@
+
+param int nlimbs=4;
+
+fn new_approx
+(
+    reg const ptr u64[nlimbs] a b,
+    reg u64 k
+) -> reg u64, reg u64, reg u64, reg u64
+{
+  reg u64 aw, bw, a0, a1, b0, b1, x0, x1, c;
+  reg u8 c8;
+  reg bool zf cond;
+
+  a0 = 0;
+  a1 = 0;
+  b0 = 0;
+  b1 = 0;
+  x0 = 0;
+  x1 = 0;
+
+  while (k > 0) {
+        k -= 1;
+    aw = a[k];
+    bw = b[k];
+
+    // x0 is 0 while x1 is 0
+    _, _, _, _, zf, x0 = #AND(x0,x0);
+    a0 = aw if zf;
+    b0 = bw if zf;
+
+    // x0<>0 one iteration after x1<>0
+    x0 = x1;
+    _, _, _, _, zf, x1 = #AND(x1,x1);
+    a1 = aw if zf;
+    b1 = bw if zf;
+
+    // x1<>0 after the first limb where either aw or bw <>0
+    x1 |= a1;
+    x1 |= b1;
+      }
+  // at this point:
+  //  a1, b1 are a[k], b[k] where k is the highest limb where a[k]|b[k]<>0
+  //  a0, b0 are a[k-1], b[k-1] (or a[k], b[k], when k=0)
+
+  // when x0==0, we set x1=-1
+  x1 = a1;
+  x1 |= b1;
+
+  // how many bits shall we take from a1, b1... (obs: 0 if (x0==0 \/ #LZCNT(x1) == 0)
+  _, _, _, _, zf, x0 = #AND(x0,x0);
+  x0 = -1;
+  x1 = x0 if zf; // when x0==0, set x1=-1 (k==0)
+  _, _, _, _, _, c = #LZCNT(x1);
+
+  // When a1/b1 have full bits we clear a0/b0 - If x1 is fully set cf = 1 by definition
+  cond = c == 0;
+    a0 = a1 if cond;
+  b0 = b1 if cond;
+
+  c8 = c;
+  _, _, _, _, _, a1 = #SHL(a1, c8);
+  _, _, _, _, _, b1 = #SHL(b1, c8);
+
+  // remaining bits are from a0, b0
+  c8 = 64;
+  c8 -= c;
+  _, _, _, _, _, a0 = #SHR(a0, c8);
+  _, _, _, _, _, b0 = #SHR(b0, c8);
+    // high-bits approximation
+  a1 |= a0;
+  b1 |= b0;
+
+  // low-bits approximation
+  a0 = a[0];
+  b0 = b[0];
+
+  return a1, b1, a0, b0;
+}
+
+inline
+fn innerloop_body_opt
+( reg u64 a_h b_h a_l b_l
+, reg u64 f0 g0 f1 g1
+) -> reg u64 /* a_h */
+   , reg u64 /* b_h */
+   , reg u64 /* a_l */
+   , reg u64 /* b_l */
+   , reg u64 /* f0 */
+   , reg u64 /* f1 */
+   , reg u64 /* g0 */
+   , reg u64 /* g1 */
+{
+
+  reg u64 ta_h, tb_h, ta_l, tb_l;
+  reg u64 tf0, tf1, tg0, tg1;
+  reg bool cond;
+
+  // Move a, b to ta, tb
+  ta_h = a_h;
+  tb_h = b_h;
+  ta_l = a_l;
+  tb_l = b_l;
+
+  // Conditional swap if a < b
+  cond = a_h < b_h;
+  a_h = tb_h if cond;
+  b_h = ta_h if cond;
+  a_l = tb_l if cond;
+  b_l = ta_l if cond;
+  
+  // Subtract b to a    
+  a_l -= b_l;
+  a_h -= b_h;
+
+  // If a was even, undo the subtraction
+  _, _, _, _, cond = #TEST(ta_l, 0x01);
+  a_h = ta_h if cond;
+  b_h = tb_h if cond;
+  a_l = ta_l if cond;
+  b_l = tb_l if cond;
+
+
+  // Move f0, f1, g0, g1 into tf0, tf1, tg0, tg1
+  tf0 = f0;
+  tf1 = f1;
+  tg0 = g0;
+  tg1 = g1;
+
+  // Conditional swap if a < b
+  cond = ta_h < tb_h;
+  f0 = tf1 if cond;
+  f1 = tf0 if cond;
+  g0 = tg1 if cond;
+  g1 = tg0 if cond;
+
+  // Subtract b to a
+  f0 -= f1;
+  g0 -= g1;
+
+  // If a was even, undo the subtraction
+  _, _, _, _, cond = #TEST(ta_l, 0x01);
+  f0 = tf0 if cond;
+  f1 = tf1 if cond;
+  g0 = tg0 if cond;
+  g1 = tg1 if cond;
+
+  // Now, a is even: apply shifts
+  a_l >>= 1;
+  a_h >>= 1;
+
+  f1 += f1;
+  g1 += g1;
+
+  return a_h, b_h, a_l, b_l, f0, g0, f1, g1;
+}
+
+export fn approx
+( reg mut ptr u64[4] approx
+) -> reg ptr u64[4]
+{
+  stack u64[nlimbs] a, b;
+  reg u64 ah, al, bh, bl, k;
+  k = 62;
+  ah, al, bh, bl = new_approx(a,b,k);
+  approx[0] = ah;
+  approx[1] = al;
+  approx[2] = bh;
+  approx[3] = bl;
+  return approx;
+}
+
+export fn inner
+( reg mut ptr u64[8] x
+) -> reg ptr u64[8]
+{
+  reg u64 ah, al, bh, bl;
+  reg u64 f0, f1, g0, g1;
+  stack u64 c;
+  () = #spill(x);
+  c = 31;
+  ah = 1;
+  al = 2;
+  bh = 3;
+  bl = 4;
+  f0 = 10;
+  f1 = 11;
+  g1 = 12;
+  g0 = 13;
+  while (c != 0) {
+    c -=2;
+  ah, al, bh, bl, f0, f1, g0, g1
+   = innerloop_body_opt(ah, al, bh, bl, f0, f1, g0, g1);
+  ah, al, bh, bl, f0, f1, g0, g1
+   = innerloop_body_opt(ah, al, bh, bl, f0, f1, g0, g1);
+  }
+  () = #unspill(x);
+  x[0] = ah;
+  x[1] = al;
+  x[2] = bh;
+  x[3] = bl;
+  x[4] = f0;
+  x[5] = f1;
+  x[6] = g0;
+  x[7] = g1;
+  return x;
+}
