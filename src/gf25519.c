@@ -1596,7 +1596,7 @@ gf_inv0(gf *d, const gf *y)
 	 17*31 = 527
 	 */
 	while (0 < i) {
-		unsigned long long k;
+		int k;
 		unsigned long long m1, m2, m3, tnz1, tnz2, tnz3;
 		unsigned long long tnzm, tnza, tnzb, snza, snzb;
 		unsigned long long s, sm;
@@ -1717,9 +1717,9 @@ gf_inv0(gf *d, const gf *y)
 			"subq	$0x7FFFFFFF, %%rdx\n\t"
 
 			: "=a" (f0), "=b" (g0), "=c" (f1), "=d" (g1),
-			  "=S" (xa), "=D" (xb)
-			: "4" (xa), "5" (xb), [ctr] "=r" (k)
-			: "cc", "r8", "r10", "r11",
+			  "=S" (xa), "=D" (xb), [cnt] "+r" (k)
+			: "4" (xa), "5" (xb)
+			: "cc", "r10", "r11",
 			  "r12", "r13", "r14", "r15" );
 
 		/*
@@ -1760,7 +1760,7 @@ gf_inv0(gf *d, const gf *y)
 	 * above, especially with the optimizations in the final rounds,
 	 * may have misdetected that case.
 	 */
-	gf_mul_inline(&v, &v, &GF_INVT527);
+	gf_mul_inline(&v, &v, &GF_INVT508);
 	gf_mul_inline(&u, &v, y);
 	r = -gf_eq(&u, &GF_ONE);
 	d->v0 = v.v0 & r;
@@ -1788,15 +1788,21 @@ gf_normalize(&a, y);
 	u = GF_ONE;
 	v = GF_ZERO;
 
+	i = 254*2; // 2*bitlength(2^255-19)
+
 	/*
-	 * Generic loop first does 15*31 = 465 iterations.
-	 17*31 = 527
+	 * Generic loop first does i = 508 iterations.
 	 */
-	for (i = 0; i < 15+2; i ++) {
+	while (0 < i) {
+		int k;
 		unsigned long long m1, m2, m3, tnz1, tnz2, tnz3;
 		unsigned long long tnzm, tnza, tnzb, snza, snzb;
 		unsigned long long s, sm;
 		gf na, nb, nu, nv;
+
+		// k = iterations of the innerloop
+		k = 31 < i ? 31 : i;
+		i -= k;
 
 		/*
 		 * Get approximations of a and b over 64 bits:
@@ -1857,10 +1863,10 @@ gf_normalize(&a, y);
 			 * to indicate that not unrolling is best here.
 			 * Loop counter is in r8.
 			 */
-			"movl	$31, %%r8d\n\t"
+			//"movl	$31, %%r8d\n\t"
 			"0:\n\t"
 			INV_INNER
-			"decl	%%r8d\n\t"
+			"decl	%[cnt]\n\t"
 			"jnz	0b\n\t"
 
 			/*
@@ -1878,9 +1884,9 @@ gf_normalize(&a, y);
 			"subq	$0x7FFFFFFF, %%rdx\n\t"
 
 			: "=a" (f0), "=b" (g0), "=c" (f1), "=d" (g1),
-			  "=S" (xa), "=D" (xb)
+			  "=S" (xa), "=D" (xb), [cnt] "+r" (k)
 			: "4" (xa), "5" (xb)
-			: "cc", "r8", "r10", "r11",
+			: "cc", "r10", "r11",
 			  "r12", "r13", "r14", "r15" );
 
 		/*
@@ -1901,8 +1907,8 @@ gf_normalize(&a, y);
 	}
 
 	/*
-	 * We did 31*17 = 527 iterations, and each injected a factor 2,
-	 * thus we must divide by 2^527 (mod q).
+	 * We did 508 iterations, and each injected a factor 2,
+	 * thus we must divide by 2^508 (mod q).
 	 */
 #if GF_MODPRIME
 	/*
@@ -1912,7 +1918,7 @@ gf_normalize(&a, y);
 	 * If the source was zero, then the result is zero as well. We
 	 * can thus test d instead of a.
 	 */
-	gf_mul_inline(d, &v, &GF_INVT527);
+	gf_mul_inline(d, &v, &GF_INVT508);
 	return gf_iszero(d) ^ 1;
 #else
 	/*
@@ -1921,7 +1927,7 @@ gf_normalize(&a, y);
 	 * above, especially with the optimizations in the final rounds,
 	 * may have misdetected that case.
 	 */
-	gf_mul_inline(&v, &v, &GF_INVT527);
+	gf_mul_inline(&v, &v, &GF_INVT508);
 	gf_mul_inline(&u, &v, y);
 	r = -gf_eq(&u, &GF_ONE);
 	d->v0 = v.v0 & r;
