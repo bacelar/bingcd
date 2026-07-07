@@ -520,7 +520,165 @@ test_inv1(void)
 		} else {
 			rand_gf(&rng, &a);
 		}
-		gf_inv0(&b, &a);
+		gf_inv1(&b, &a);
+		gf_mul(&c, &a, &b);
+		gf_encode(tmp, &c);
+		if (memcmp(tmp, ONE, sizeof ONE) != 0) {
+			fprintf(stderr, "ERR: INV:\n");
+			gf_to_mpz(za, &a);
+			gf_to_mpz(zb, &b);
+			gmp_printf("a = %Zd\n", za);
+			gmp_printf("b = %Zd\n", zb);
+			print_gf("a", &a);
+			print_gf("b", &b);
+			print_gf("c", &c);
+			exit(EXIT_FAILURE);
+		}
+
+#if defined GF_INV_FLT && GF_INV_FLT
+		memset(&b, 0, sizeof b);
+		gf_inv_FLT(&b, &a);
+		gf_mul(&c, &a, &b);
+		gf_encode(tmp, &c);
+		if (memcmp(tmp, ONE, sizeof ONE) != 0) {
+			fprintf(stderr, "ERR: INV(FLT):\n");
+			gf_to_mpz(za, &a);
+			gf_to_mpz(zb, &b);
+			gmp_printf("a = %Zd\n", za);
+			gmp_printf("b = %Zd\n", zb);
+			print_gf("a", &a);
+			print_gf("b", &b);
+			print_gf("c", &c);
+			exit(EXIT_FAILURE);
+		}
+#endif
+
+		if (i % 400 == 0) {
+			printf(".");
+			fflush(stdout);
+		}
+	}
+
+	mpz_clear(za);
+	mpz_clear(zb);
+
+	printf(" done.\n");
+	fflush(stdout);
+}
+
+void
+test_inv2(void)
+{
+	shake_context rng;
+	gf a, b, c;
+	mpz_t za, zb;
+	int i;
+
+	printf("Test inv2: ");
+	fflush(stdout);
+
+	mpz_init(za);
+	mpz_init(zb);
+
+	rand_init(&rng, "test inv");
+
+	for (i = 0; i < 10000; i ++) {
+		uint8_t tmp[32];
+		static const uint8_t ONE[] = {
+			1, 0, 0, 0, 0, 0, 0, 0,
+			0, 0, 0, 0, 0, 0, 0, 0,
+			0, 0, 0, 0, 0, 0, 0, 0,
+			0, 0, 0, 0, 0, 0, 0, 0
+		};
+
+		if (i == 0) {
+			a.v0 = 0;
+			a.v1 = 0;
+			a.v2 = 0;
+			a.v3 = (uint64_t)1 << 62;
+		} else {
+			rand_gf(&rng, &a);
+		}
+		gf_inv2(&b, &a);
+		gf_mul(&c, &a, &b);
+		gf_encode(tmp, &c);
+		if (memcmp(tmp, ONE, sizeof ONE) != 0) {
+			fprintf(stderr, "ERR: INV:\n");
+			gf_to_mpz(za, &a);
+			gf_to_mpz(zb, &b);
+			gmp_printf("a = %Zd\n", za);
+			gmp_printf("b = %Zd\n", zb);
+			print_gf("a", &a);
+			print_gf("b", &b);
+			print_gf("c", &c);
+			exit(EXIT_FAILURE);
+		}
+
+#if defined GF_INV_FLT && GF_INV_FLT
+		memset(&b, 0, sizeof b);
+		gf_inv_FLT(&b, &a);
+		gf_mul(&c, &a, &b);
+		gf_encode(tmp, &c);
+		if (memcmp(tmp, ONE, sizeof ONE) != 0) {
+			fprintf(stderr, "ERR: INV(FLT):\n");
+			gf_to_mpz(za, &a);
+			gf_to_mpz(zb, &b);
+			gmp_printf("a = %Zd\n", za);
+			gmp_printf("b = %Zd\n", zb);
+			print_gf("a", &a);
+			print_gf("b", &b);
+			print_gf("c", &c);
+			exit(EXIT_FAILURE);
+		}
+#endif
+
+		if (i % 400 == 0) {
+			printf(".");
+			fflush(stdout);
+		}
+	}
+
+	mpz_clear(za);
+	mpz_clear(zb);
+
+	printf(" done.\n");
+	fflush(stdout);
+}
+
+void
+test_inv3(void)
+{
+	shake_context rng;
+	gf a, b, c;
+	mpz_t za, zb;
+	int i;
+
+	printf("Test inv3: ");
+	fflush(stdout);
+
+	mpz_init(za);
+	mpz_init(zb);
+
+	rand_init(&rng, "test inv");
+
+	for (i = 0; i < 10000; i ++) {
+		uint8_t tmp[32];
+		static const uint8_t ONE[] = {
+			1, 0, 0, 0, 0, 0, 0, 0,
+			0, 0, 0, 0, 0, 0, 0, 0,
+			0, 0, 0, 0, 0, 0, 0, 0,
+			0, 0, 0, 0, 0, 0, 0, 0
+		};
+
+		if (i == 0) {
+			a.v0 = 0;
+			a.v1 = 0;
+			a.v2 = 0;
+			a.v3 = (uint64_t)1 << 62;
+		} else {
+			rand_gf(&rng, &a);
+		}
+		gf_inv3(&b, &a);
 		gf_mul(&c, &a, &b);
 		gf_encode(tmp, &c);
 		if (memcmp(tmp, ONE, sizeof ONE) != 0) {
@@ -793,6 +951,80 @@ speed_inv1(void)
 #undef NUM
 }
 
+static void
+speed_inv2(void)
+{
+	size_t u;
+	uint64_t tt[1000];
+	gf a, b;
+
+#define NUM   ((sizeof tt) / (sizeof tt[0]))
+
+	memset(&a, 'T', sizeof a);
+	memset(&b, 'P', sizeof b);
+	for (u = 0; u < 2 * NUM; u ++) {
+		uint64_t begin, end;
+		int i;
+
+		begin = core_cycles();
+		for (i = 0; i < 25; i ++) {
+			gf_inv2(&b, &a);
+			gf_inv2(&a, &b);
+			gf_inv2(&b, &a);
+			gf_inv2(&a, &b);
+		}
+		end = core_cycles();
+		if (u >= NUM) {
+			tt[u - NUM] = end - begin;
+		}
+	}
+	qsort(tt, (sizeof tt) / sizeof(tt[0]), sizeof tt[0], &cmp_u64);
+	printf("inversion (binary GCD v2): %9.2f (%.2f .. %.2f)\n",
+		(double)tt[NUM / 2] / 100.0,
+		(double)tt[NUM / 10] / 100.0,
+		(double)tt[(9 * NUM) / 10] / 100.0);
+	fflush(stdout);
+
+#undef NUM
+}
+
+static void
+speed_inv3(void)
+{
+	size_t u;
+	uint64_t tt[1000];
+	gf a, b;
+
+#define NUM   ((sizeof tt) / (sizeof tt[0]))
+
+	memset(&a, 'T', sizeof a);
+	memset(&b, 'P', sizeof b);
+	for (u = 0; u < 2 * NUM; u ++) {
+		uint64_t begin, end;
+		int i;
+
+		begin = core_cycles();
+		for (i = 0; i < 25; i ++) {
+			gf_inv3(&b, &a);
+			gf_inv3(&a, &b);
+			gf_inv3(&b, &a);
+			gf_inv3(&a, &b);
+		}
+		end = core_cycles();
+		if (u >= NUM) {
+			tt[u - NUM] = end - begin;
+		}
+	}
+	qsort(tt, (sizeof tt) / sizeof(tt[0]), sizeof tt[0], &cmp_u64);
+	printf("inversion (binary GCD v3): %9.2f (%.2f .. %.2f)\n",
+		(double)tt[NUM / 2] / 100.0,
+		(double)tt[NUM / 10] / 100.0,
+		(double)tt[(9 * NUM) / 10] / 100.0);
+	fflush(stdout);
+
+#undef NUM
+}
+
 #if defined GF_INV_FLT && GF_INV_FLT
 static void
 speed_inv_FLT(void)
@@ -858,6 +1090,8 @@ main(int argc, char *argv[])
 	test_inv();
 	test_inv0();
 	test_inv1();
+	test_inv2();
+	test_inv3();
 
 	printf("Speed benchmark (median, low 10%%, high 10%%):\n");
 	fflush(stdout);
@@ -866,6 +1100,8 @@ main(int argc, char *argv[])
 	speed_inv();
 	speed_inv0();
 	speed_inv1();
+	speed_inv2();
+	speed_inv3();
 #if defined GF_INV_FLT && GF_INV_FLT
 	speed_inv_FLT();
 #endif

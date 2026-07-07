@@ -6,6 +6,8 @@
 
 #include "gf25519.h"
 
+#include <stdio.h>
+
 /*
  * We work in field Z_p with p = 2^255-MQ. The code below can be
  * used to work modulo any odd integer with that format, provided that
@@ -983,6 +985,95 @@ s256_lin_div31_abs(gf *d, const gf *a, const gf *b,
 }
 
 /*
+ * Same contract as s256_lin_div31_abs, but for a group of 62 inner
+ * iterations: the combination a*f+b*g must be divided by 2^62 (not 2^31),
+ * and f,g may be as large as ~2^62 (signed). The 64x62-bit products reach
+ * ~126 bits, so two of them plus the carry still fit in a 128-bit
+ * accumulator with no overflow (same bound as gf_lin).
+ */
+static inline uint64_t
+s256_lin_div62_abs(gf *d, const gf *a, const gf *b,
+	unsigned long long f, unsigned long long g)
+{
+	gf ta, tb;
+	unsigned long long sf, sg, d0, d1, d2, d3, t;
+	unsigned __int128 z;
+	unsigned char cc;
+
+	/*
+	 * If f < 0, replace f with -f but keep the sign in sf.
+	 * Similarly for g.
+	 */
+	sf = f >> 63;
+	f = (f ^ -sf) + sf;
+	sg = g >> 63;
+	g = (g ^ -sg) + sg;
+
+	/*
+	 * Apply signs sf and sg to a and b, respectively.
+	 */
+	cc = _addcarry_u64(0, a->v0 ^ -sf, sf, (unsigned long long *)&ta.v0);
+	cc = _addcarry_u64(cc, a->v1 ^ -sf, 0, (unsigned long long *)&ta.v1);
+	cc = _addcarry_u64(cc, a->v2 ^ -sf, 0, (unsigned long long *)&ta.v2);
+	cc = _addcarry_u64(cc, a->v3 ^ -sf, 0, (unsigned long long *)&ta.v3);
+
+	cc = _addcarry_u64(0, b->v0 ^ -sg, sg, (unsigned long long *)&tb.v0);
+	cc = _addcarry_u64(cc, b->v1 ^ -sg, 0, (unsigned long long *)&tb.v1);
+	cc = _addcarry_u64(cc, b->v2 ^ -sg, 0, (unsigned long long *)&tb.v2);
+	cc = _addcarry_u64(cc, b->v3 ^ -sg, 0, (unsigned long long *)&tb.v3);
+
+	/*
+	 * Compute a*f+b*g into d0:d1:d2:d3:t. With f,g at most ~2^62 the
+	 * partial products are at most ~126 bits, so summing two of them
+	 * plus the running carry stays within 128 bits.
+	 */
+	z = (unsigned __int128)ta.v0 * (unsigned __int128)f
+		+ (unsigned __int128)tb.v0 * (unsigned __int128)g;
+	d0 = (unsigned long long)z;
+	t = (unsigned long long)(z >> 64);
+	z = (unsigned __int128)ta.v1 * (unsigned __int128)f
+		+ (unsigned __int128)tb.v1 * (unsigned __int128)g
+		+ (unsigned __int128)t;
+	d1 = (unsigned long long)z;
+	t = (unsigned long long)(z >> 64);
+	z = (unsigned __int128)ta.v2 * (unsigned __int128)f
+		+ (unsigned __int128)tb.v2 * (unsigned __int128)g
+		+ (unsigned __int128)t;
+	d2 = (unsigned long long)z;
+	t = (unsigned long long)(z >> 64);
+	z = (unsigned __int128)ta.v3 * (unsigned __int128)f
+		+ (unsigned __int128)tb.v3 * (unsigned __int128)g
+		+ (unsigned __int128)t;
+	d3 = (unsigned long long)z;
+	t = (unsigned long long)(z >> 64);
+
+	/*
+	 * Correct the overestimation coming from the signs of a and b.
+	 */
+	t -= -(unsigned long long)(ta.v3 >> 63) & f;
+	t -= -(unsigned long long)(tb.v3 >> 63) & g;
+
+	/*
+	 * Apply the shift: divide by 2^62 (fill from the next word << 2).
+	 */
+	d0 = (d0 >> 62) | (d1 << 2);
+	d1 = (d1 >> 62) | (d2 << 2);
+	d2 = (d2 >> 62) | (d3 << 2);
+	d3 = (d3 >> 62) | (t << 2);
+
+	/*
+	 * Perform conditional negation, if the result is negative.
+	 */
+	t >>= 63;
+	cc = _addcarry_u64(0, d0 ^ -t, t, (unsigned long long *)&d->v0);
+	cc = _addcarry_u64(cc, d1 ^ -t, 0, (unsigned long long *)&d->v1);
+	cc = _addcarry_u64(cc, d2 ^ -t, 0, (unsigned long long *)&d->v2);
+	(void)_addcarry_u64(cc, d3 ^ -t, 0, (unsigned long long *)&d->v3);
+
+	return t;
+}
+
+/*
  * Compute u*f+v*g (modulo p). Parameters f and g are provided with
  * an unsigned type, but they are signed integers in the -2^62..+2^62 range.
  */
@@ -1165,174 +1256,97 @@ gf_lin(gf *d, const gf *u, const gf *v,
  * Assembly code for the wide_approx 
  */
 #define WIDE_APPROX \
-	/* \
-	CLOBBER:
-		 zf => cc
-	   x1 => rax
-		 x0 => rcx
-		 al => rsi
-		 bl => rdi
-		 c  => rcx
-		 c8 => cl
-	 */ \
-	"movq	%[a3], %[ah]\n\t" \
-		//ah = a3;\
-	"movq	%[b3], %[bh]\n\t" \
-		//bh = b3;\
-	"movq	%[a3], %%rax\n\t" \
-		//x1 = a3;\
-	"orq 	%[b3], %%rax\n\t" \
-		//x1 |= b3;\
-	"movq	%[a2], %%rsi\n\t" \
-		//al = a2;\
-	"movq	%[b2], %%rdi\n\t" \
-		//bl = b2;\
-	"movq	%%rax, %%rcx\n\t" \
-		//x0 = x1;\
-	"andq	%%rax, %%rax\n\t" \
-		//zf, x1 = #AND(x1,x1);\
-	"cmove %[a2], %[ah]\n\t" \
-		//ah = a2 if zf;\
-	"cmove %[b2], %[bh]\n\t" \
-		//bh = b2 if zf;\
-	"orq 	%[a2], %%rax\n\t" \
-		//x1 |= a2;\
-	"orq 	%[b2], %%rax\n\t" \
-		//x1 |= b2;\
-	"andq	%%rcx, %%rcx\n\t" \
-	  //zf, x0 = #AND(x0,x0);\
-	"cmove	%[a1], %%rsi\n\t" \
-		//al = a1 if zf;\
-	"cmove	%[b1], %%rdi\n\t" \
-		//bl = b1 if zf;\
-	"movq	%%rax, %%rcx\n\t" \
-		//x0 = x1;\
-	"andq	%%rax, %%rax\n\t" \
-		//zf, x1 = #AND(x1,x1);\
-	"cmove	%[a1], %[ah]\n\t" \
-		//ah = a1 if zf;\
-	"cmove	%[b1], %[bh]\n\t" \
-		//bh = b1 if zf;\
-	"orq 	%[a1], %%rax\n\t" \
-		//x1 |= a1;\
-	"orq 	%[b1], %%rax\n\t" \
-		//x1 |= b1;\
-	"andq	%%rcx, %%rcx\n\t" \
-	  //zf, x0 = #AND(x0,x0);\
-	"cmove	%[a0], %%rsi\n\t" \
-	  //al = a0 if zf;\
-	"cmove	%[b0], %%rdi\n\t" \
-		//bl = b0 if zf;\
-	"andq	%%rax, %%rax\n\t" \
-		//zf, x1 = #AND(x1,x1);\
-	"cmove	%[a0], %[ah]\n\t" \
-		//ah = a0 if zf;\
-	"cmove	%[b1], %[bh]\n\t" \
-		//bh = b0 if zf;\
-	"movq	%[ah], %%rcx\n\t" \
-	  //c = ah;\
-	"orq 	%[bh], %%rcx\n\t" \
-		//c |= bh;\
-	"lzcntq	%%rcx, %%rcx\n\t" \
-		//c = #LZCNT_64(c);\
-	"negq	%%rcx\n\t" \
-		//c = #NEG_64(c);\
-	"andb	$63, %%cl\n\t" \
-		//c8 = ((8u) c) & 63;\
-	"shldq	%%cl, %%rsi, %[ah]\n\t" \
-	  //ah = #SHLD(ah, al, c8);\
-	"shldq	%%cl, %%rdi, %[bh]\n\t" \
-	  //bh = #SHLD(bh, bl, c8);
+	/* CLOBBER: zf=>cc, x1=>rax, x0=>rcx, al=>rsi, bl=>rdi, \
+	   c=>rcx, c8=>cl.  NB: comments are /_* *_/ blocks, not //, \
+	   because line-splicing runs before comment removal, so a \
+	   trailing "// ... \" swallows the rest of the macro. */ \
+	"movq	%[a3], %[ah]\n\t"       /* ah = a3 */ \
+	"movq	%[b3], %[bh]\n\t"       /* bh = b3 */ \
+	"movq	%[a3], %%rax\n\t"       /* x1 = a3 */ \
+	"orq 	%[b3], %%rax\n\t"       /* x1 |= b3 */ \
+	"movq	%[a2], %%rsi\n\t"       /* al = a2 */ \
+	"movq	%[b2], %%rdi\n\t"       /* bl = b2 */ \
+	"movq	%%rax, %%rcx\n\t"       /* x0 = x1 */ \
+	"andq	%%rax, %%rax\n\t"       /* zf, x1 = AND(x1,x1) */ \
+	"cmove	%[a2], %[ah]\n\t"       /* ah = a2 if zf */ \
+	"cmove	%[b2], %[bh]\n\t"       /* bh = b2 if zf */ \
+	"orq 	%[a2], %%rax\n\t"       /* x1 |= a2 */ \
+	"orq 	%[b2], %%rax\n\t"       /* x1 |= b2 */ \
+	"andq	%%rcx, %%rcx\n\t"       /* zf, x0 = AND(x0,x0) */ \
+	"cmove	%[a1], %%rsi\n\t"       /* al = a1 if zf */ \
+	"cmove	%[b1], %%rdi\n\t"       /* bl = b1 if zf */ \
+	"movq	%%rax, %%rcx\n\t"       /* x0 = x1 */ \
+	"andq	%%rax, %%rax\n\t"       /* zf, x1 = AND(x1,x1) */ \
+	"cmove	%[a1], %[ah]\n\t"       /* ah = a1 if zf */ \
+	"cmove	%[b1], %[bh]\n\t"       /* bh = b1 if zf */ \
+	"orq 	%[a1], %%rax\n\t"       /* x1 |= a1 */ \
+	"orq 	%[b1], %%rax\n\t"       /* x1 |= b1 */ \
+	"andq	%%rcx, %%rcx\n\t"       /* zf, x0 = AND(x0,x0) */ \
+	"cmove	%[a0], %%rsi\n\t"       /* al = a0 if zf */ \
+	"cmove	%[b0], %%rdi\n\t"       /* bl = b0 if zf */ \
+	"andq	%%rax, %%rax\n\t"       /* zf, x1 = AND(x1,x1) */ \
+	"cmove	%[a0], %[ah]\n\t"       /* ah = a0 if zf */ \
+	"cmove	%[b0], %[bh]\n\t"       /* bh = b0 if zf */ \
+	"movq	%[ah], %%rcx\n\t"       /* c = ah */ \
+	"orq 	%[bh], %%rcx\n\t"       /* c |= bh */ \
+	"lzcntq	%%rcx, %%rcx\n\t"       /* c = LZCNT_64(c) */ \
+	/* NB: the Jazz approx_h has a #NEG_64(c) here, but that makes \
+	   the shift 64-LZCNT instead of LZCNT and zeroes the high \
+	   approximation (e.g. a = 2^254).  gf_inv0 shifts left by \
+	   s = LZCNT (tnza <<= s), so the negation must be dropped. \
+	   The Jazz source needs the same fix + regeneration. */ \
+	"andb	$63, %%cl\n\t"          /* c8 = ((8u) c) & 63 */ \
+	"shldq	%%cl, %%rsi, %[ah]\n\t" /* ah = SHLD(ah, al, c8) */ \
+	"shldq	%%cl, %%rdi, %[bh]\n\t" /* bh = SHLD(bh, bl, c8) */
 
 
 /*
  * Assembly code for the wide-inner 
  */
 #define WIDE_INNER \
-	/* 
-	INPUT: ah, bh, al, bl, f0, f1, g0, g1
-	CLOBBER:
-		 cond => cc
-	   ta_h => rax
-	   tb_h => rbx
-		 ta_l => rbp
-		 tf0 => rcx
-		 tb_h, tf1 => rdx
-		 tg0  => rsi
-		 tg1  => rdi
-	 */ \
-  "movq %[ah], %%rax\n\t" \
-  	//ta_h = a_h;
-	"movq %[bh], %%rbx\n\t" \
-  	//tb_h = b_h;
-	"movq %[al], %%rbp\n\t" \
-  	//ta_l = a_l;
-	"movq $[bl], %%rdx\n\t" \
-		//tb_l = b_l;
-	"cmpq %[ah], %[al]\n\t" \
-  	//cond = a_h < b_h;
-	"cmovb %%rbx, %[ah]\n\t" \
-		//a_h = tb_h if cond;
-	"cmovb %%rax, %[bh]\n\t" \
-  	//b_h = ta_h if cond;
-	"cmovb %%rdx, %[al]\n\t" \
-  	// "a_l = tb_l if cond;
-	"cmovb %%rbp, %[bl]\n\t" \
-  	// b_l = ta_l if cond;
-  "subq %[bl], %[al]\n~t" \
-		// a_l -= b_l;
-  "subq %[bh], %[ah]\n\t" \
-		// a_h -= b_h;
-	"tesq $1, %%rcx\n\t" \
-  	// cond = #TEST(ta_l, 0x01);
-	"cmove %%rax, %[ah]\n\t" \
-		//a_h = ta_h if cond;
-	"cmove %%rbx, %[bh]\n\t" \
-  	//b_h = tb_h if cond;
-	"cmove %%rbp, %[al]\n\t" \
-  	//a_l = ta_l if cond;
-	"cmove %%rdx, %[bl]\n\t" \
-  	//b_l = tb_l if cond;
-	"movq %[f0], %%rcx\n\t" \
-		//tf0 = f0;
-	"movq %[f1], %%rdx\n\t" \
-  	//tf1 = f1;
-	"movq %[g0], %%rsi\n\t" \
-  	//tg0 = g0;
-	"movq %[g1], %%rdi\n\t" \
-  	//tg1 = g1;
-	"cmpq %%rax, %%rbx\n\t" \
-		//cond = ta_h < tb_h;
-	"cmovb %%rdx, %[f0]\n\t" \
-		//f0 = tf1 if cond;
-	"cmovb %%rcx, %[f1]\n\t" \
-  	//f1 = tf0 if cond;
-	"cmovb %%rdi, %[g0]\n\t" \
-  	//g0 = tg1 if cond;
-	"cmovb %%rsi, %[g1]\n\t" \
-  	//g1 = tg0 if cond;
-	"subq %[f1], %[f0]\n\t" \
-  	//f0 -= f1;
-	"subq %[g1], %[g0]\n\t" \
-  	//g0 -= g1;
-	"testq $1, %%rbp\n\t" \
-		// cond = #TEST(ta_l, 0x01);
-	"cmove	%%rcx, %[f0]\n\t" \
-  	//f0 = tf0 if cond;
-	"cmove	%%rdx, %[f1]\n\t" \
-  	//f1 = tf1 if cond;
-	"cmove	%%rsi, %[g0]\n\t" \
-  	//g0 = tg0 if cond;
-	"cmove	%%rdi, %[g1]\n\t" \
-  	//g1 = tg1 if cond;
-	"shrq $1, %[al]\n\t" \
-	  //a_l >>= 1;
-	"shrq $1, %[ah]\n\t" \
-  	//a_h >>= 1;
-	"addq %[f1], %[f1]\n\t" \
-  	//f1 += f1;
-	"addq %[g1], %[g1]\n\t" \
-	  //g1 += g1;
+	/* INPUT: ah, bh, al, bl, f0, f1, g0, g1 \
+	   CLOBBER (no rbp: it is the frame pointer and cannot be \
+	   used/clobbered in GCC inline asm; 6 scratch regs suffice): \
+	     cond => cc,  ta_h,tg1 => rax,  tb_h => rbx,  ta_l => rsi, \
+	     tb_l,tf1 => rdx,  tf0 => rcx,  tg0 => rdi. \
+	   Comments are /_* *_/ blocks, not //, so line-splicing does \
+	   not swallow the macro body. */ \
+	"movq %[ah], %%rax\n\t"    /* ta_h = a_h */ \
+	"movq %[bh], %%rbx\n\t"    /* tb_h = b_h */ \
+	"movq %[al], %%rsi\n\t"    /* ta_l = a_l */ \
+	"movq %[bl], %%rdx\n\t"    /* tb_l = b_l */ \
+	"cmpq %[bh], %[ah]\n\t"    /* cond = a_h < b_h */ \
+	"cmovb %%rbx, %[ah]\n\t"   /* a_h = tb_h if cond */ \
+	"cmovb %%rax, %[bh]\n\t"   /* b_h = ta_h if cond */ \
+	"cmovb %%rdx, %[al]\n\t"   /* a_l = tb_l if cond */ \
+	"cmovb %%rsi, %[bl]\n\t"   /* b_l = ta_l if cond */ \
+	"subq %[bl], %[al]\n\t"    /* a_l -= b_l */ \
+	"subq %[bh], %[ah]\n\t"    /* a_h -= b_h */ \
+	"testq $1, %%rsi\n\t"      /* cond = TEST(ta_l, 0x01) */ \
+	"cmove %%rax, %[ah]\n\t"   /* a_h = ta_h if cond */ \
+	"cmove %%rbx, %[bh]\n\t"   /* b_h = tb_h if cond */ \
+	"cmove %%rsi, %[al]\n\t"   /* a_l = ta_l if cond */ \
+	"cmove %%rdx, %[bl]\n\t"   /* b_l = tb_l if cond */ \
+	"cmpq %%rbx, %%rax\n\t"    /* cond = ta_h < tb_h (before loads free rax,rbx) */ \
+	"movq %[f0], %%rcx\n\t"    /* tf0 = f0 (movq preserves flags) */ \
+	"movq %[f1], %%rdx\n\t"    /* tf1 = f1 */ \
+	"movq %[g0], %%rdi\n\t"    /* tg0 = g0 */ \
+	"movq %[g1], %%rax\n\t"    /* tg1 = g1 (reuse rax, ta_h now dead) */ \
+	"cmovb %%rdx, %[f0]\n\t"   /* f0 = tf1 if cond */ \
+	"cmovb %%rcx, %[f1]\n\t"   /* f1 = tf0 if cond */ \
+	"cmovb %%rax, %[g0]\n\t"   /* g0 = tg1 if cond */ \
+	"cmovb %%rdi, %[g1]\n\t"   /* g1 = tg0 if cond */ \
+	"subq %[f1], %[f0]\n\t"    /* f0 -= f1 */ \
+	"subq %[g1], %[g0]\n\t"    /* g0 -= g1 */ \
+	"testq $1, %%rsi\n\t"      /* cond = TEST(ta_l, 0x01) */ \
+	"cmove	%%rcx, %[f0]\n\t"  /* f0 = tf0 if cond */ \
+	"cmove	%%rdx, %[f1]\n\t"  /* f1 = tf1 if cond */ \
+	"cmove	%%rdi, %[g0]\n\t"  /* g0 = tg0 if cond */ \
+	"cmove	%%rax, %[g1]\n\t"  /* g1 = tg1 if cond */ \
+	"shrq $1, %[al]\n\t"       /* a_l >>= 1 */ \
+	"shrq $1, %[ah]\n\t"       /* a_h >>= 1 */ \
+	"addq %[f1], %[f1]\n\t"    /* f1 += f1 */ \
+	"addq %[g1], %[g1]\n\t"    /* g1 += g1 */
 
 
 /* ================================================================== */
@@ -1879,7 +1893,7 @@ gf_normalize(&a, y);
 	i = 254*2; // 2*bitlength(2^255-19)
 
 	/*
-	 * Generic loop first does i = 508 iterations.
+	 * Generic outerloop does ceil(i/31) iterations.
 	 */
 	while (0 < i) {
 		int k;
@@ -1933,50 +1947,20 @@ gf_normalize(&a, y);
 		 * total on a Coffee Lake core.
 		 */
 
-		__asm__ __volatile__ (
-			/*
-			 * f0 = 1
-			 * g0 = 0
-			 * f1 = 0
-			 * g1 = 1
-			 * We add 0x7FFFFFFF to all four values, and
-			 * group them by pairs into registers.
-			 */
-			"movq	$0x7FFFFFFF7FFFFFFF, %%rdx\n\t"
-			"movq	$0x7FFFFFFF80000000, %%rax\n\t"
-			"movq	$0x800000007FFFFFFF, %%rcx\n\t"
-
-			/*
-			 * Do the loop. Tests on a Coffee Lake core seem
-			 * to indicate that not unrolling is best here.
-			 * Loop counter is in r8.
-			 */
-			//"movl	$31, %%r8d\n\t"
-			"0:\n\t"
-			INV_INNER
-			"decl	%[cnt]\n\t"
-			"jnz	0b\n\t"
-
-			/*
-			 * Split f0, f1, g0 and g1 into separate variables.
-			 */
-			"movq	%%rax, %%rbx\n\t"
-			"movq	%%rcx, %%rdx\n\t"
-			"shrq	$32, %%rbx\n\t"
-			"shrq	$32, %%rdx\n\t"
-			"orl	%%eax, %%eax\n\t"
-			"orl	%%ecx, %%ecx\n\t"
-			"subq	$0x7FFFFFFF, %%rax\n\t"
-			"subq	$0x7FFFFFFF, %%rbx\n\t"
-			"subq	$0x7FFFFFFF, %%rcx\n\t"
-			"subq	$0x7FFFFFFF, %%rdx\n\t"
-
-			: "=a" (f0), "=b" (g0), "=c" (f1), "=d" (g1),
-			  "=S" (xa), "=D" (xb), [cnt] "+r" (k)
-			: "4" (xa), "5" (xb)
-			: "cc", "r10", "r11",
-			  "r12", "r13", "r14", "r15" );
-
+		unsigned long long f0, f1, g0, g1;
+		f0 = 1; f1 = 0;
+		g0 = 0; g1 = 1;
+		while (0 < k) {
+			k -= 1;
+			__asm__ __volatile__ (
+				INV_INNER
+				: "+a" (f0), "+b" (g0), "+c" (f1), "+d" (g1),
+			 	  "+S" (xa), "+D" (xb)
+				:
+				: "cc", "r10", "r11",
+			  	"r12", "r13", "r14", "r15"
+			);
+		}
 		/*
 		 * We now need to propagate updates to a, b, u and v.
 		 */
@@ -2046,7 +2030,7 @@ gf_normalize(&a, y);
 	i = 254*2; // 2*bitlength(2^255-19)
 
 	/*
-	 * Generic loop first does i = 508 iterations.
+	 * Generic loop does ceil(i/31) iterations.
 	 */
 	while (0 < i) {
 		int k;
@@ -2074,9 +2058,9 @@ gf_normalize(&a, y);
 		al = a0; bl = b0; // low-part of approxs.
 		__asm__ __volatile__ (
 			WIDE_APPROX
-			: [ah] "r" (ah), [al] "r" (al)
+			: [ah] "=&r" (ah), [bh] "=&r" (bh)
 			: [a0] "r" (a0), [a1] "r" (a1), [a2] "r" (a2), [a3] "r" (a3),
-			  [ab] "r" (b0), [b1] "r" (b1), [b2] "r" (b2), [b3] "r" (b3),
+			  [b0] "r" (b0), [b1] "r" (b1), [b2] "r" (b2), [b3] "r" (b3)
 			: "cc", "rax", "rcx", "rsi", "rdi"
 		);
 
@@ -2088,7 +2072,7 @@ gf_normalize(&a, y);
 				: [ah] "+r" (ah), [al] "+r" (al), [bh] "+r" (bh), [bl] "+r" (bl)
 				, [f0] "+r" (f0), [f1] "+r" (f1), [g0] "+r" (g0), [g1] "+r" (g1)
 				:
-				: "cc", "rax", "rbx", "rbp", "rcx", "rdx", "rsi", "rdi"
+				: "cc", "rax", "rbx", "rcx", "rdx", "rsi", "rdi"
 			);
 		}
 		/*
@@ -2096,6 +2080,116 @@ gf_normalize(&a, y);
 	 	*/
 		nega = s256_lin_div31_abs(&na, &a, &b, f0, g0);
 		negb = s256_lin_div31_abs(&nb, &a, &b, f1, g1);
+		f0 = (f0 ^ -nega) + nega;
+		g0 = (g0 ^ -nega) + nega;
+		f1 = (f1 ^ -negb) + negb;
+		g1 = (g1 ^ -negb) + negb;
+		gf_lin(&nu, &u, &v, f0, g0);
+		gf_lin(&nv, &u, &v, f1, g1);
+		a = na;
+		b = nb;
+		u = nu;
+		v = nv;
+	}
+
+	/*
+	 * We did 508 iterations, and each injected a factor 2,
+	 * thus we must divide by 2^508 (mod q).
+	 */
+#if GF_MODPRIME
+	/*
+	 * Result is correct if source operand was invertible, i.e.
+	 * distinct from zero (since all non-zero values are invertible
+	 * modulo a prime integer); the inverse is then also non-zero.
+	 * If the source was zero, then the result is zero as well. We
+	 * can thus test d instead of a.
+	 */
+	gf_mul_inline(d, &v, &GF_INVT508);
+	return gf_iszero(d) ^ 1;
+#else
+	/*
+	 * Verification of the computed inverse: for a non-prime modulus,
+	 * there are non-invertible values other than zero, and the code
+	 * above, especially with the optimizations in the final rounds,
+	 * may have misdetected that case.
+	 */
+	gf_mul_inline(&v, &v, &GF_INVT508);
+	gf_mul_inline(&u, &v, y);
+	r = -gf_eq(&u, &GF_ONE);
+	d->v0 = v.v0 & r;
+	d->v1 = v.v1 & r;
+	d->v2 = v.v2 & r;
+	d->v3 = v.v3 & r;
+	return r & 1;
+#endif
+}
+
+/* see gf25519.h */
+uint64_t
+gf_inv3(gf *d, const gf *y)
+{
+	gf a, b, u, v;
+	unsigned long long f0, f1, g0, g1, xa, xb;
+	unsigned long long nega, negb;
+	int i;
+#if !GF_MODPRIME
+	unsigned long long r;
+#endif
+
+gf_normalize(&a, y);
+	b = GF_P;
+	u = GF_ONE;
+	v = GF_ZERO;
+
+	i = 254*2; // 2*bitlength(2^255-19)
+
+	/*
+	 * Generic loop does ceil(i/31) iterations.
+	 */
+	while (0 < i) {
+		int k;
+		unsigned long long a0, a1, a2, a3, b0, b1, b2, b3;
+		unsigned long long ah, al, bh, bl;
+		unsigned long long m1, m2, m3, tnz1, tnz2, tnz3;
+		unsigned long long tnzm, tnza, tnzb, snza, snzb;
+		unsigned long long s, sm;
+		gf na, nb, nu, nv;
+
+		// k = iterations of the innerloop
+		k = 62 < i ? 62 : i;
+		i -= k;
+
+		/*
+		 * Get wide approximations of a and b over 64 bits:
+		 * I.e. we remove the "middle bits".
+		 */
+		a0 = a.v0; a1 = a.v1; a2 = a.v2; a3 = a.v3;
+		b0 = b.v0; b1 = b.v1; b2 = b.v2; b3 = b.v3;
+		al = a0; bl = b0; // low-part of approxs.
+		__asm__ __volatile__ (
+			WIDE_APPROX
+			: [ah] "=&r" (ah), [bh] "=&r" (bh)
+			: [a0] "r" (a0), [a1] "r" (a1), [a2] "r" (a2), [a3] "r" (a3),
+			  [b0] "r" (b0), [b1] "r" (b1), [b2] "r" (b2), [b3] "r" (b3)
+			: "cc", "rax", "rcx", "rsi", "rdi"
+		);
+
+		f0 = 1; g0 = 0; f1 = 0; g1 = 1;
+		while (0 < k) {
+			k -= 1;
+			__asm__ __volatile__ (
+				WIDE_INNER
+				: [ah] "+r" (ah), [al] "+r" (al), [bh] "+r" (bh), [bl] "+r" (bl)
+				, [f0] "+r" (f0), [f1] "+r" (f1), [g0] "+r" (g0), [g1] "+r" (g1)
+				:
+				: "cc", "rax", "rbx", "rcx", "rdx", "rsi", "rdi"
+			);
+		}
+		/*
+	 	 * We now need to propagate updates to a, b, u and v.
+	 	*/
+		nega = s256_lin_div62_abs(&na, &a, &b, f0, g0);
+		negb = s256_lin_div62_abs(&nb, &a, &b, f1, g1);
 		f0 = (f0 ^ -nega) + nega;
 		g0 = (g0 ^ -nega) + nega;
 		f1 = (f1 ^ -negb) + negb;
