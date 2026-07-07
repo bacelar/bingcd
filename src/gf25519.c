@@ -1159,6 +1159,94 @@ gf_lin(gf *d, const gf *u, const gf *v,
 	"addq	%%rcx, %%rcx\n\t" \
 	"subq	%%rdx, %%rcx\n\t"
 
+
+/* ================================================================== */
+/*
+ * Assembly code for the wide_approx 
+ */
+#define WIDE_APPROX \
+	/* \
+	CLOBBER:
+		 zf => cc
+	   x1 => rax
+		 x0 => rcx
+		 al => rsi
+		 bl => rdi
+		 c  => rcx
+		 c8 => cl
+	 */ \
+	"movq	%[a3], %[ah]\n\t" \
+		//ah = a3;\
+	"movq	%[b3], %[bh]\n\t" \
+		//bh = b3;\
+	"movq	%[a3], %%rax\n\t" \
+		//x1 = a3;\
+	"orq 	%[b3], %%rax\n\t" \
+		//x1 |= b3;\
+	"movq	%[a2], %%rsi\n\t" \
+		//al = a2;\
+	"movq	%[b2], %%rdi\n\t" \
+		//bl = b2;\
+	"movq	%%rax, %%rcx\n\t" \
+		//x0 = x1;\
+	"andq	%%rax, %%rax\n\t" \
+		//zf, x1 = #AND(x1,x1);\
+	"cmove %[a2], %[ah]\n\t" \
+		//ah = a2 if zf;\
+	"cmove %[b2], %[bh]\n\t" \
+		//bh = b2 if zf;\
+	"orq 	%[a2], %%rax\n\t" \
+		//x1 |= a2;\
+	"orq 	%[b2], %%rax\n\t" \
+		//x1 |= b2;\
+	"andq	%%rcx, %%rcx\n\t" \
+	  //zf, x0 = #AND(x0,x0);\
+	"cmove	%[a1], %%rsi\n\t" \
+		//al = a1 if zf;\
+	"cmove	%[b1], %%rdi\n\t" \
+		//bl = b1 if zf;\
+	"movq	%%rax, %%rcx\n\t" \
+		//x0 = x1;\
+	"andq	%%rax, %%rax\n\t" \
+		//zf, x1 = #AND(x1,x1);\
+	"cmove	%[a1], %[ah]\n\t" \
+		//ah = a1 if zf;\
+	"cmove	%[b1], %[bh]\n\t" \
+		//bh = b1 if zf;\
+	"orq 	%[a1], %%rax\n\t" \
+		//x1 |= a1;\
+	"orq 	%[b1], %%rax\n\t" \
+		//x1 |= b1;\
+	"andq	%%rcx, %%rcx\n\t" \
+	  //zf, x0 = #AND(x0,x0);\
+	"cmove	%[a0], %%rsi\n\t" \
+	  //al = a0 if zf;\
+	"cmove	%[b0], %%rdi\n\t" \
+		//bl = b0 if zf;\
+	"andq	%%rax, %%rax\n\t" \
+		//zf, x1 = #AND(x1,x1);\
+	"cmove	%[a0], %[ah]\n\t" \
+		//ah = a0 if zf;\
+	"cmove	%[b1], %[bh]\n\t" \
+		//bh = b0 if zf;\
+	"movq	%[ah], %%rcx\n\t" \
+	  //c = ah;\
+	"orq 	%[bh], %%rcx\n\t" \
+		//c |= bh;\
+	"lzcntq	%%rcx, %%rcx\n\t" \
+		//c = #LZCNT_64(c);\
+	"negq	%%rcx\n\t" \
+		//c = #NEG_64(c);\
+	"andb	$63, %%cl\n\t" \
+		//c8 = ((8u) c) & 63;\
+	"shldq	%%cl, %%rsi, %[ah]\n\t" \
+	  //ah = #SHLD(ah, al, c8);\
+	"shldq	%%cl, %%rdi, %[bh]\n\t" \
+	  //bh = #SHLD(bh, bl, c8);
+
+
+
+
 /* ================================================================== */
 
 /* see gf25519.h */
@@ -1494,75 +1582,7 @@ gf_inv0(gf *d, const gf *y)
 	/*
 	 * Extended binary GCD:
 	 *
-	 *   a <- y
-	 *   b <- q
-	 *   u <- 1
-	 *   v <- 0
-	 *
-	 * a and b are nonnnegative integers (in the 0..q range). u
-	 * and v are integers modulo q.
-	 *
-	 * Invariants:
-	 *    a = y*u mod q
-	 *    b = y*v mod q
-	 *    b is always odd
-	 *
-	 * At each step:
-	 *    if a is even, then:
-	 *        a <- a/2, u <- u/2 mod q
-	 *    else:
-	 *        if a < b:
-	 *            (a, u, b, v) <- (b, v, a, u)
-	 *        a <- (a-b)/2, u <- (u-v)/2 mod q
-	 *
-	 * At one point, value a reaches 0; it will then stay there
-	 * (all subsequent steps will only keep a at zero). The value
-	 * of b is then GCD(y, p), i.e. 1 if y is invertible; value v
-	 * is then the inverse of y modulo p.
-	 *
-	 * If y = 0, then a is initially at zero and stays there, and
-	 * v is unchanged. The function then returns 0 as "inverse" of
-	 * zero, which is the desired behaviour; therefore, no corrective
-	 * action is necessary.
-	 *
-	 * It can be seen that each step will decrease the size of one of
-	 * a and b by at least 1 bit; thus, starting with two values of
-	 * at most 255 bits each, 509 iterations are always sufficient.
-	 *
-	 *
-	 * In practice, we optimize this code in the following way:
-	 *  - We do iterations by group of 31.
-	 *  - In each group, we use _approximations_ of a and b that
-	 *    fit on 64 bits each:
-	 *      Let n = max(len(a), len(b)).
-	 *      If n <= 64, then xa = na and xb = nb.
-	 *      Otherwise:
-	 *         xa = (a mod 2^31) + 2^31*floor(a / 2^(n - 33))
-	 *         xb = (b mod 2^31) + 2^31*floor(b / 2^(n - 33))
-	 *    I.e. we keep the same low 31 bits, but we remove all the
-	 *    "middle" bits to just keep the higher bits. At least one
-	 *    of the two values xa and xb will have maximum length (64 bits)
-	 *    if either of a or b exceeds 64 bits.
-	 *  - We record which subtract and swap we did into update
-	 *    factors, which we apply en masse to a, b, u and v after
-	 *    the 31 iterations.
-	 *
-	 * Since we kept the correct low 31 bits, all the "subtract or
-	 * not" decisions are correct, but the "swap or not swap" might
-	 * be wrong, since these use the difference between the two
-	 * values, and we only have approximations thereof. A consequence
-	 * is that after the update, a and/or b may be negative. If a < 0,
-	 * we negate it, and also negate u (which we do by negating the
-	 * update factors f0 and g0 before applying them to compute the
-	 * new value of u); similary for b and v.
-	 *
-	 * It can be shown that the 31 iterations, along with the
-	 * conditional negation, ensure that len(a)+len(b) is still
-	 * reduced by at least 31 bits (compared with the classic binary
-	 * GCD, the use of the approximations may make the code "miss one
-	 * bit", but the conditional subtraction regains it). Thus,
-	 * 509 iterations are sufficient in total. As explained later on,
-	 * we can skip the final iteration as well.
+	 *   uniform alg. with INNERLOOP_FAST
 	 */
 
 	gf_normalize(&a, y);
@@ -1570,15 +1590,21 @@ gf_inv0(gf *d, const gf *y)
 	u = GF_ONE;
 	v = GF_ZERO;
 
+	i = 254*2; // 2*bitlength(2^255-19)
 	/*
 	 * Generic loop first does 15*31 = 465 iterations.
 	 17*31 = 527
 	 */
-	for (i = 0; i < 15+2; i ++) {
+	while (0 < i) {
+		unsigned long long k;
 		unsigned long long m1, m2, m3, tnz1, tnz2, tnz3;
 		unsigned long long tnzm, tnza, tnzb, snza, snzb;
 		unsigned long long s, sm;
 		gf na, nb, nu, nv;
+
+		// k = iterations of the innerloop
+		k = 31 < i ? 31 : i;
+		i -= k;
 
 		/*
 		 * Get approximations of a and b over 64 bits:
@@ -1668,12 +1694,12 @@ gf_inv0(gf *d, const gf *y)
 			/*
 			 * Do the loop. Tests on a Coffee Lake core seem
 			 * to indicate that not unrolling is best here.
-			 * Loop counter is in r8.
+			 * Loop counter is in %[cnt].
 			 */
-			"movl	$31, %%r8d\n\t"
+			//"movl	%[cnt], %%r8d\n\t"
 			"0:\n\t"
 			INV_INNER_FAST
-			"decl	%%r8d\n\t"
+			"decl	%[cnt]\n\t"
 			"jnz	0b\n\t"
 
 			/*
@@ -1692,7 +1718,7 @@ gf_inv0(gf *d, const gf *y)
 
 			: "=a" (f0), "=b" (g0), "=c" (f1), "=d" (g1),
 			  "=S" (xa), "=D" (xb)
-			: "4" (xa), "5" (xb)
+			: "4" (xa), "5" (xb), [ctr] "=r" (k)
 			: "cc", "r8", "r10", "r11",
 			  "r12", "r13", "r14", "r15" );
 
@@ -1714,8 +1740,8 @@ gf_inv0(gf *d, const gf *y)
 	}
 
 	/*
-	 * We did 31*17 = 527 iterations, and each injected a factor 2,
-	 * thus we must divide by 2^527 (mod q).
+	 * We did 58 iterations, and each injected a factor 2,
+	 * thus we must divide by 2^508 (mod q).
 	 */
 #if GF_MODPRIME
 	/*
@@ -1725,7 +1751,7 @@ gf_inv0(gf *d, const gf *y)
 	 * If the source was zero, then the result is zero as well. We
 	 * can thus test d instead of a.
 	 */
-	gf_mul_inline(d, &v, &GF_INVT527);
+	gf_mul_inline(d, &v, &GF_INVT508);
 	return gf_iszero(d) ^ 1;
 #else
 	/*

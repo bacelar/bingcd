@@ -1,10 +1,10 @@
 	.att_syntax
 	.text
 	.p2align	5
-	.global	inner
-	.global	approx
-	.type	inner, %function
-inner:
+	.global	_inner
+	.global	_c_approx_new
+	.global	_c_approx
+_inner:
 	movq	%rsp, %rax
 	leaq	-72(%rsp), %rsp
 	andq	$-8, %rsp
@@ -15,8 +15,7 @@ inner:
 	movq	%r14, 48(%rsp)
 	movq	%r15, 56(%rsp)
 	movq	%rax, 64(%rsp)
-	movq	%rdi, (%rsp)
-	movq	$31, 8(%rsp)
+	movq	%rdi, 8(%rsp)
 	movq	$1, %rax
 	movq	$2, %rcx
 	movq	$3, %rdx
@@ -27,7 +26,7 @@ inner:
 	movq	$13, %r10
 	jmp 	Linner$1
 Linner$2:
-	subq	$2, 8(%rsp)
+	subq	$2, (%rsp)
 	movq	%rax, %r11
 	movq	%rcx, %rbx
 	movq	%rdx, %rbp
@@ -101,9 +100,9 @@ Linner$2:
 	addq	%r10, %r10
 	addq	%r9, %r9
 Linner$1:
-	cmpq	$0, 8(%rsp)
+	cmpq	$0, (%rsp)
 	jne 	Linner$2
-	movq	(%rsp), %r11
+	movq	8(%rsp), %r11
 	movq	%rax, (%r11)
 	movq	%rcx, 8(%r11)
 	movq	%rdx, 16(%r11)
@@ -120,73 +119,145 @@ Linner$1:
 	movq	56(%rsp), %r15
 	movq	64(%rsp), %rsp
 	ret
-	.type	approx, %function
-approx:
+_c_approx_new:
 	movq	%rsp, %rax
-	leaq	-96(%rsp), %rsp
+	leaq	-56(%rsp), %rsp
 	andq	$-8, %rsp
-	movq	%rbx, 64(%rsp)
-	movq	%rbp, 72(%rsp)
-	movq	%r12, 80(%rsp)
-	movq	%rax, 88(%rsp)
-	movq	$62, %rbx
-	leaq	32(%rsp), %rax
-	movq	%rsp, %rdx
-	call	Lnew_approx$1
-Lapprox$1:
-	movq	%r8, (%rdi)
-	movq	%r10, 8(%rdi)
-	movq	%rsi, 16(%rdi)
-	movq	%r9, 24(%rdi)
-	movq	64(%rsp), %rbx
-	movq	72(%rsp), %rbp
-	movq	80(%rsp), %r12
-	movq	88(%rsp), %rsp
+	movq	%rbx, (%rsp)
+	movq	%rbp, 8(%rsp)
+	movq	%r12, 16(%rsp)
+	movq	%r13, 24(%rsp)
+	movq	%r14, 32(%rsp)
+	movq	%r15, 40(%rsp)
+	movq	%rax, 48(%rsp)
+	movq	%rdx, %r11
+	movq	24(%rsi), %rax
+	movq	16(%rsi), %rcx
+	movq	8(%rsi), %rdx
+	movq	(%rsi), %rsi
+	movq	24(%r11), %r8
+	movq	16(%r11), %r9
+	movq	8(%r11), %r10
+	movq	(%r11), %r11
+	call	Lapprox_h$1
+Lc_approx_new$1:
+	movq	%rbx, (%rdi)
+	movq	%rsi, 8(%rdi)
+	movq	%rbp, 16(%rdi)
+	movq	%r11, 24(%rdi)
+	movq	(%rsp), %rbx
+	movq	8(%rsp), %rbp
+	movq	16(%rsp), %r12
+	movq	24(%rsp), %r13
+	movq	32(%rsp), %r14
+	movq	40(%rsp), %r15
+	movq	48(%rsp), %rsp
 	ret
-Lnew_approx$1:
-	movq	$0, %rsi
+_c_approx:
+	movq	%rsp, %rax
+	leaq	-88(%rsp), %rsp
+	andq	$-8, %rsp
+	movq	%r13, 64(%rsp)
+	movq	%r14, 72(%rsp)
+	movq	%rax, 80(%rsp)
+	movq	$0, %rax
+	movq	$0, %rdx
 	movq	$0, %r8
 	movq	$0, %r9
-	movq	$0, %r10
+	movq	$0, %rsi
 	movq	$0, %rcx
-	movq	$0, %r11
-	jmp 	Lnew_approx$2
-Lnew_approx$3:
-	decq	%rbx
-	movq	(%rax,%rbx,8), %rbp
-	movq	(%rdx,%rbx,8), %r12
+	movq	56(%rsp), %r10
+	movq	24(%rsp), %r11
+	andq	%rsi, %rsi
+	cmove	%r10, %rax
+	cmove	%r11, %r8
+	movq	%rcx, %rsi
 	andq	%rcx, %rcx
-	cmove	%rbp, %rsi
-	cmove	%r12, %r9
-	movq	%r11, %rcx
-	andq	%r11, %r11
-	cmove	%rbp, %r8
-	cmove	%r12, %r10
-	orq 	%r8, %r11
-	orq 	%r10, %r11
-Lnew_approx$2:
-	cmpq	$0, %rbx
-	jnbe	Lnew_approx$3
-	movq	%r8, %r11
-	orq 	%r10, %r11
+	cmove	%r10, %rdx
+	cmove	%r11, %r9
+	orq 	%rdx, %rcx
+	orq 	%r9, %rcx
+	movq	48(%rsp), %r10
+	movq	16(%rsp), %r11
+	andq	%rsi, %rsi
+	cmove	%r10, %rax
+	cmove	%r11, %r8
+	movq	%rcx, %rsi
 	andq	%rcx, %rcx
-	movq	$-1, %rcx
-	cmove	%rcx, %r11
-	lzcntq	%r11, %r11
-	cmpq	$0, %r11
-	cmove	%r8, %rsi
-	cmove	%r10, %r9
-	movb	%r11b, %cl
-	shlq	%cl, %r8
-	shlq	%cl, %r10
-	movb	$64, %cl
-	subb	%r11b, %cl
-	shrq	%cl, %rsi
-	shrq	%cl, %r9
-	orq 	%rsi, %r8
+	cmove	%r10, %rdx
+	cmove	%r11, %r9
+	orq 	%rdx, %rcx
+	orq 	%r9, %rcx
+	movq	40(%rsp), %r10
+	movq	8(%rsp), %r11
+	andq	%rsi, %rsi
+	cmove	%r10, %rax
+	cmove	%r11, %r8
+	movq	%rcx, %rsi
+	andq	%rcx, %rcx
+	cmove	%r10, %rdx
+	cmove	%r11, %r9
+	orq 	%rdx, %rcx
+	orq 	%r9, %rcx
+	movq	32(%rsp), %r10
+	movq	(%rsp), %r11
+	andq	%rsi, %rsi
+	cmove	%r10, %rax
+	cmove	%r11, %r8
+	andq	%rcx, %rcx
+	cmove	%r10, %rdx
+	cmove	%r11, %r9
+	movq	%rdx, %r10
 	orq 	%r9, %r10
-	movq	(%rax), %rsi
-	movq	(%rdx), %r9
+	lzcntq	%r10, %rcx
+	negq	%rcx
+	andb	$63, %cl
+	shldq	%cl, %rax, %rdx
+	shldq	%cl, %r8, %r9
+	movq	32(%rsp), %r13
+	movq	(%rsp), %r14
+	movq	%rdx, (%rdi)
+	movq	%r13, 8(%rdi)
+	movq	%r9, 16(%rdi)
+	movq	%r14, 24(%rdi)
+	movq	64(%rsp), %r13
+	movq	72(%rsp), %r14
+	movq	80(%rsp), %rsp
+	ret
+Lapprox_h$1:
+	movq	%rsi, %rbx
+	movq	%r11, %rbp
+	movq	%rsi, %r12
+	orq 	%r11, %r12
+	movq	%rdx, %r13
+	movq	%r10, %r14
+	movq	%r12, %r15
+	andq	%r12, %r12
+	cmove	%rdx, %rbx
+	cmove	%r10, %rbp
+	orq 	%rdx, %r12
+	orq 	%r10, %r12
+	andq	%r15, %r15
+	cmove	%rcx, %r13
+	cmove	%r9, %r14
+	movq	%r12, %r15
+	andq	%r12, %r12
+	cmove	%rcx, %rbx
+	cmove	%r9, %rbp
+	orq 	%rcx, %r12
+	orq 	%r9, %r12
+	andq	%r15, %r15
+	cmove	%rax, %r13
+	cmove	%r8, %r14
+	andq	%r12, %r12
+	cmove	%rax, %rbx
+	cmove	%r8, %rbp
+	movq	%rbx, %rcx
+	orq 	%rbp, %rcx
+	lzcntq	%rcx, %rcx
+	negq	%rcx
+	andb	$63, %cl
+	shldq	%cl, %r13, %rbx
+	shldq	%cl, %r14, %rbp
 	ret
 	.ident	"Jasmin Compiler @VERSION@"
-	.section	".note.GNU-stack", "", %progbits
