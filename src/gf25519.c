@@ -1245,6 +1245,94 @@ gf_lin(gf *d, const gf *u, const gf *v,
 	  //bh = #SHLD(bh, bl, c8);
 
 
+/*
+ * Assembly code for the wide-inner 
+ */
+#define WIDE_INNER \
+	/* 
+	INPUT: ah, bh, al, bl, f0, f1, g0, g1
+	CLOBBER:
+		 cond => cc
+	   ta_h => rax
+	   tb_h => rbx
+		 ta_l => rbp
+		 tf0 => rcx
+		 tb_h, tf1 => rdx
+		 tg0  => rsi
+		 tg1  => rdi
+	 */ \
+  "movq %[ah], %%rax\n\t" \
+  	//ta_h = a_h;
+	"movq %[bh], %%rbx\n\t" \
+  	//tb_h = b_h;
+	"movq %[al], %%rbp\n\t" \
+  	//ta_l = a_l;
+	"movq $[bl], %%rdx\n\t" \
+		//tb_l = b_l;
+	"cmpq %[ah], %[al]\n\t" \
+  	//cond = a_h < b_h;
+	"cmovb %%rbx, %[ah]\n\t" \
+		//a_h = tb_h if cond;
+	"cmovb %%rax, %[bh]\n\t" \
+  	//b_h = ta_h if cond;
+	"cmovb %%rdx, %[al]\n\t" \
+  	// "a_l = tb_l if cond;
+	"cmovb %%rbp, %[bl]\n\t" \
+  	// b_l = ta_l if cond;
+  "subq %[bl], %[al]\n~t" \
+		// a_l -= b_l;
+  "subq %[bh], %[ah]\n\t" \
+		// a_h -= b_h;
+	"tesq $1, %%rcx\n\t" \
+  	// cond = #TEST(ta_l, 0x01);
+	"cmove %%rax, %[ah]\n\t" \
+		//a_h = ta_h if cond;
+	"cmove %%rbx, %[bh]\n\t" \
+  	//b_h = tb_h if cond;
+	"cmove %%rbp, %[al]\n\t" \
+  	//a_l = ta_l if cond;
+	"cmove %%rdx, %[bl]\n\t" \
+  	//b_l = tb_l if cond;
+	"movq %[f0], %%rcx\n\t" \
+		//tf0 = f0;
+	"movq %[f1], %%rdx\n\t" \
+  	//tf1 = f1;
+	"movq %[g0], %%rsi\n\t" \
+  	//tg0 = g0;
+	"movq %[g1], %%rdi\n\t" \
+  	//tg1 = g1;
+	"cmpq %%rax, %%rbx\n\t" \
+		//cond = ta_h < tb_h;
+	"cmovb %%rdx, %[f0]\n\t" \
+		//f0 = tf1 if cond;
+	"cmovb %%rcx, %[f1]\n\t" \
+  	//f1 = tf0 if cond;
+	"cmovb %%rdi, %[g0]\n\t" \
+  	//g0 = tg1 if cond;
+	"cmovb %%rsi, %[g1]\n\t" \
+  	//g1 = tg0 if cond;
+	"subq %[f1], %[f0]\n\t" \
+  	//f0 -= f1;
+	"subq %[g1], %[g0]\n\t" \
+  	//g0 -= g1;
+	"testq $1, %%rbp\n\t" \
+		// cond = #TEST(ta_l, 0x01);
+	"cmove	%%rcx, %[f0]\n\t" \
+  	//f0 = tf0 if cond;
+	"cmove	%%rdx, %[f1]\n\t" \
+  	//f1 = tf1 if cond;
+	"cmove	%%rsi, %[g0]\n\t" \
+  	//g0 = tg0 if cond;
+	"cmove	%%rdi, %[g1]\n\t" \
+  	//g1 = tg1 if cond;
+	"shrq $1, %[al]\n\t" \
+	  //a_l >>= 1;
+	"shrq $1, %[ah]\n\t" \
+  	//a_h >>= 1;
+	"addq %[f1], %[f1]\n\t" \
+  	//f1 += f1;
+	"addq %[g1], %[g1]\n\t" \
+	  //g1 += g1;
 
 
 /* ================================================================== */
@@ -1892,6 +1980,120 @@ gf_normalize(&a, y);
 		/*
 		 * We now need to propagate updates to a, b, u and v.
 		 */
+		nega = s256_lin_div31_abs(&na, &a, &b, f0, g0);
+		negb = s256_lin_div31_abs(&nb, &a, &b, f1, g1);
+		f0 = (f0 ^ -nega) + nega;
+		g0 = (g0 ^ -nega) + nega;
+		f1 = (f1 ^ -negb) + negb;
+		g1 = (g1 ^ -negb) + negb;
+		gf_lin(&nu, &u, &v, f0, g0);
+		gf_lin(&nv, &u, &v, f1, g1);
+		a = na;
+		b = nb;
+		u = nu;
+		v = nv;
+	}
+
+	/*
+	 * We did 508 iterations, and each injected a factor 2,
+	 * thus we must divide by 2^508 (mod q).
+	 */
+#if GF_MODPRIME
+	/*
+	 * Result is correct if source operand was invertible, i.e.
+	 * distinct from zero (since all non-zero values are invertible
+	 * modulo a prime integer); the inverse is then also non-zero.
+	 * If the source was zero, then the result is zero as well. We
+	 * can thus test d instead of a.
+	 */
+	gf_mul_inline(d, &v, &GF_INVT508);
+	return gf_iszero(d) ^ 1;
+#else
+	/*
+	 * Verification of the computed inverse: for a non-prime modulus,
+	 * there are non-invertible values other than zero, and the code
+	 * above, especially with the optimizations in the final rounds,
+	 * may have misdetected that case.
+	 */
+	gf_mul_inline(&v, &v, &GF_INVT508);
+	gf_mul_inline(&u, &v, y);
+	r = -gf_eq(&u, &GF_ONE);
+	d->v0 = v.v0 & r;
+	d->v1 = v.v1 & r;
+	d->v2 = v.v2 & r;
+	d->v3 = v.v3 & r;
+	return r & 1;
+#endif
+}
+
+/* see gf25519.h */
+uint64_t
+gf_inv2(gf *d, const gf *y)
+{
+	gf a, b, u, v;
+	unsigned long long f0, f1, g0, g1, xa, xb;
+	unsigned long long nega, negb;
+	int i;
+#if !GF_MODPRIME
+	unsigned long long r;
+#endif
+
+gf_normalize(&a, y);
+	b = GF_P;
+	u = GF_ONE;
+	v = GF_ZERO;
+
+	i = 254*2; // 2*bitlength(2^255-19)
+
+	/*
+	 * Generic loop first does i = 508 iterations.
+	 */
+	while (0 < i) {
+		int k;
+		unsigned long long a0, a1, a2, a3, b0, b1, b2, b3;
+		unsigned long long ah, al, bh, bl;
+		unsigned long long m1, m2, m3, tnz1, tnz2, tnz3;
+		unsigned long long tnzm, tnza, tnzb, snza, snzb;
+		unsigned long long s, sm;
+		gf na, nb, nu, nv;
+
+		// k = iterations of the innerloop
+		k = 31 < i ? 31 : i;
+		i -= k;
+
+		/*
+		 * Get wide approximations of a and b over 64 bits:
+		 *  - ah, bh hold the 64 msb of a and b
+		 *  - Otherwise, with n = max(len(a), len(b)), we use:
+		 *       (a mod 2^31) + 2^31*(floor(a / 2^(n-33)))
+		 *       (b mod 2^31) + 2^31*(floor(b / 2^(n-33)))
+		 * I.e. we remove the "middle bits".
+		 */
+		a0 = a.v0; a1 = a.v1; a2 = a.v2; a3 = a.v3;
+		b0 = b.v0; b1 = b.v1; b2 = b.v2; b3 = b.v3;
+		al = a0; bl = b0; // low-part of approxs.
+		__asm__ __volatile__ (
+			WIDE_APPROX
+			: [ah] "r" (ah), [al] "r" (al)
+			: [a0] "r" (a0), [a1] "r" (a1), [a2] "r" (a2), [a3] "r" (a3),
+			  [ab] "r" (b0), [b1] "r" (b1), [b2] "r" (b2), [b3] "r" (b3),
+			: "cc", "rax", "rcx", "rsi", "rdi"
+		);
+
+		f0 = 1; g0 = 0; f1 = 0; g1 = 1;
+		while (0 < k) {
+			k -= 1;
+			__asm__ __volatile__ (
+				WIDE_INNER
+				: [ah] "+r" (ah), [al] "+r" (al), [bh] "+r" (bh), [bl] "+r" (bl)
+				, [f0] "+r" (f0), [f1] "+r" (f1), [g0] "+r" (g0), [g1] "+r" (g1)
+				:
+				: "cc", "rax", "rbx", "rbp", "rcx", "rdx", "rsi", "rdi"
+			);
+		}
+		/*
+	 	 * We now need to propagate updates to a, b, u and v.
+	 	*/
 		nega = s256_lin_div31_abs(&na, &a, &b, f0, g0);
 		negb = s256_lin_div31_abs(&nb, &a, &b, f1, g1);
 		f0 = (f0 ^ -nega) + nega;
